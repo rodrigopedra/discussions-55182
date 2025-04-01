@@ -19,20 +19,24 @@ Access: http://127.0.0.1:8000/api/test
 Test existing tenant with header:
 
 ```console
-$ curl -X GET --location "http://127.0.0.1:8000/api/test" -H "X-Tenant: foo"
-{"host":["127.0.0.1:8000"],"user-agent":["curl\/8.12.1"],"accept":["*\/*"],"x-tenant":["foo"]}
+$ curl -X GET --location "http://127.0.0.1:8000/api/test" -H "Accept: application/json" -H "X-Tenant: foo"
+{"host":["127.0.0.1:8000"],"user-agent":["curl\/8.12.1"],"accept":["application\/json"],"x-tenant":["foo"]}
 ```
 
 Test missing tenant with header:
 
 ```console
-$ curl -X GET --location "http://127.0.0.1:8000/api/test" -H "X-Tenant: bar"
-{"error":"Tenant not found"}
+$ curl -X GET --location "http://127.0.0.1:8000/api/test" -H "Accept: application/json" -H "X-Tenant: bar"
+{
+    "message": "Tenant not found"
+}
 ```
 
 Test without header:
 
 ```console
-$ curl -X GET --location "http://127.0.0.1:8000/api/test"
-{"error":"Tenant identifier required (subdomain or X-Tenant header)"}
+$ curl -X GET --location "http://127.0.0.1:8000/api/test" -H "Accept: application/json" 
+{
+    "message": "Tenant identifier required (subdomain or X-Tenant header)"
+}
 ```

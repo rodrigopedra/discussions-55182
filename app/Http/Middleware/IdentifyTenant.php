@@ -3,61 +3,82 @@
 namespace App\Http\Middleware;
 
 use App\Models\Tenant;
-use Closure;
+use Illuminate\Contracts\Cache\Repository as CacheStore;
+use Illuminate\Contracts\Config\Repository as Config;
+use Illuminate\Contracts\Database\Eloquent\Builder;
+use Illuminate\Database\DatabaseManager;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Config;
-use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class IdentifyTenant
 {
-    public function handle(Request $request, Closure $next)
+    public function __construct(
+        private readonly CacheStore $cache,
+        private readonly Config $config,
+        private readonly DatabaseManager $db,
+    ) {}
+
+    public function handle(Request $request, \Closure $next)
     {
-        $tenantIdentifier = null;
+        $tenantIdentifier = $this->resolveTenant($request);
 
-        // 1️⃣ First, check for X-Tenant header (Postman or API clients)
-        if ($request->hasHeader('X-Tenant')) {
-            $tenantIdentifier = $request->header('X-Tenant');
-        }
-        // 2️⃣ Otherwise, try to get tenant from subdomain
-        // ADDED: check if it is not an IP, e.g. when using php artisan serve
-        elseif (!filter_var($request->getHost(), FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_IPV6 )) {
-            $hostParts = explode('.', $request->getHost());
-            if (count($hostParts) > 2) { // Ensure it's a subdomain (e.g., tenant.yourdomain.com)
-                $tenantIdentifier = $hostParts[0];
-            }
+        if (is_null($tenantIdentifier)) {
+            throw new BadRequestHttpException('Tenant identifier required (subdomain or X-Tenant header)');
         }
 
-        // 3️⃣ Validate tenant identifier
-        if (! $tenantIdentifier) {
-            // Config::set('database.default', 'master');
-            // DB::purge('master');
-            // DB::reconnect('master');
+        $tenant = $this->fetchTenant($tenantIdentifier);
 
-            // return $next($request);
-
-            return response()->json(['error' => 'Tenant identifier required (subdomain or X-Tenant header)'], 400);
+        if (is_null($tenant)) {
+            throw new NotFoundHttpException('Tenant not found');
         }
 
-        // 4️⃣ Fetch tenant from cache or database
-        $tenant = Cache::remember("tenant_{$tenantIdentifier}", 3600, function () use ($tenantIdentifier) {
-            return Tenant::where('subdomain', $tenantIdentifier)
-                ->orWhere('db_name', $tenantIdentifier)
-                ->first();
-        });
-
-        if (! $tenant) {
-            return response()->json(['error' => 'Tenant not found'], 404);
-        }
-
-        // 5️⃣ Configure database connection dynamically
-        Config::set('database.connections.tenant.database', $tenant->db_name);
-
-        // 6️⃣ Refresh the tenant database connection
-        DB::purge('tenant');
-        DB::reconnect('tenant');
-        DB::setDefaultConnection('tenant');
+        $this->configureTenant($tenant);
 
         return $next($request);
+    }
+
+    private function resolveTenant(Request $request): ?string
+    {
+        // Check for X-Tenant header (API clients)
+        if ($request->hasHeader('X-Tenant')) {
+            return $request->header('X-Tenant');
+        }
+
+        // Skip when requesting from an IP
+        if (filter_var($request->getHost(), FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_IPV6)) {
+            return null;
+        }
+
+        // Try to get tenant from subdomain
+        $hostParts = explode('.', $request->getHost());
+
+        // Ensure it's a subdomain (e.g., tenant.example.com)
+        if (count($hostParts) > 2) {
+            return $hostParts[0];
+        }
+
+        return null;
+    }
+
+    private function fetchTenant(string $tenantIdentifier): ?Tenant
+    {
+        return $this->cache->remember(
+            key: 'tenant_' . $tenantIdentifier,
+            ttl: 3600,
+            callback: fn () => Tenant::query()->firstWhere(fn (Builder $builder) => $builder
+                ->orWhere('subdomain', $tenantIdentifier)
+                ->orWhere('db_name', $tenantIdentifier),
+            ),
+        );
+    }
+
+    private function configureTenant(Tenant $tenant): void
+    {
+        $this->config->set('database.connections.tenant.database', $tenant->db_name);
+
+        $this->db->purge('tenant');
+        $this->db->reconnect('tenant');
+        $this->db->setDefaultConnection('tenant');
     }
 }
